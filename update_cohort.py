@@ -404,13 +404,25 @@ def _update_lms_settings(page, row) -> dict:
                 page.locator(".lms-section-dropdown button").first.click()
                 page.wait_for_timeout(1_000)
 
+            def _chip_count() -> int:
+                """Count currently selected section chips on the page."""
+                return page.locator("span.bg-green-50").count()
+
             def _try_select_section(section: str) -> bool:
-                """One attempt to select a single section. Returns True on success."""
+                """
+                One attempt to select a single section.
+                Returns True ONLY if the chip count actually increased after the click
+                (guards against clicking the wrong element — Done button, chip-remove
+                button, group header, etc. — which can all appear to succeed but do nothing).
+                """
                 if not _section_dropdown_open():
                     _open_section_dropdown()
 
                 search = page.get_by_placeholder("Search sections...")
                 search.wait_for(state="visible", timeout=6_000)
+
+                # Snapshot chip count before clicking so we can verify after
+                before = _chip_count()
 
                 # Triple-click selects all existing text, then fill overwrites cleanly
                 search.triple_click()
@@ -418,26 +430,53 @@ def _update_lms_settings(page, row) -> dict:
                 search.fill(section)
                 page.wait_for_timeout(1_500)  # wait for search results to load
 
-                # Find the result button — look inside the dropdown first,
-                # then fall back to full page (in case the list renders outside the container)
+                # Build candidate list — exclude "Done (N selected)" button so it
+                # cannot accidentally be matched when a section name is short/generic
                 pattern = re.compile(re.escape(section), re.I)
-                result = page.locator(".lms-section-dropdown").get_by_role("button").filter(
+                done_pat = re.compile(r"Done \(\d+ selected\)", re.I)
+
+                def _best_candidate(locator):
+                    """Return first button whose text matches section but is NOT the Done button."""
+                    for idx in range(locator.count()):
+                        btn = locator.nth(idx)
+                        try:
+                            txt = btn.inner_text().strip()
+                        except Exception:
+                            continue
+                        if done_pat.search(txt):
+                            continue   # skip the Done button
+                        if pattern.search(txt):
+                            return btn
+                    return None
+
+                # Look inside the dropdown first; fall back to full page
+                scoped = page.locator(".lms-section-dropdown").get_by_role("button").filter(
                     has_text=pattern
                 )
-                if result.count() == 0:
-                    result = page.get_by_role("button").filter(has_text=pattern)
-                if result.count() == 0:
-                    return False  # no matching result in dropdown
+                candidate = _best_candidate(scoped)
+                if candidate is None:
+                    full = page.get_by_role("button").filter(has_text=pattern)
+                    candidate = _best_candidate(full)
+                if candidate is None:
+                    print(f"      no result found for '{section}'")
+                    return False
 
-                result.first.click()
-                page.wait_for_timeout(1_200)  # wait for chip to appear / UI to settle
+                candidate.click()
+                page.wait_for_timeout(1_500)  # wait for chip to appear / UI to settle
+
+                # ── KEY CHECK: did the chip count actually go up? ─────────────
+                after = _chip_count()
+                if after <= before:
+                    print(f"      click registered but chip count unchanged "
+                          f"({before} → {after}) — wrong element hit, retrying")
+                    return False
 
                 # Clear search field before next section
                 if _section_dropdown_open():
                     search = page.get_by_placeholder("Search sections...")
                     search.triple_click()
                     search.fill("")
-                    page.wait_for_timeout(700)
+                    page.wait_for_timeout(800)
 
                 return True
 
@@ -683,7 +722,8 @@ def _ensure_logged_in(login_url: str = LOGIN_URL, profile_dir: str = PROFILE_DIR
 # ═══════════════════════════════════════════════════════════════════════════════
 # Entry point
 # ═══════════════════════════════════════════════════════════════════════════════
-def run(base_url: str = BASE_URL, login_url: str = LOGIN_URL, profile_dir: str = PROFILE_DIR):
+def run(base_url: str = BASE_URL, login_url: str = LOGIN_URL, profile_dir: str = PROFILE_DIR,
+        start_cohort: str = ""):
     # ── Step 1: CSV selection ─────────────────────────────────────────────────
     csv_files = sorted(glob.glob(os.path.join(INPUT_DIR, "*.csv")))
 
@@ -712,6 +752,16 @@ def run(base_url: str = BASE_URL, login_url: str = LOGIN_URL, profile_dir: str =
     if "cohort_id" not in df.columns:
         print("[ERROR] CSV must have a 'cohort_id' column.")
         return
+
+    # ── Apply --start-cohort filter ───────────────────────────────────────────
+    if start_cohort:
+        ids = df["cohort_id"].astype(str).str.strip()
+        mask = ids == str(start_cohort).strip()
+        if not mask.any():
+            print(f"[ERROR] cohort_id '{start_cohort}' not found in CSV.")
+            return
+        df = df[mask.cumsum() >= 1].reset_index(drop=True)
+        print(f"Resuming from cohort {start_cohort} — {len(df)} row(s) remaining")
 
     print(f"\nRows to process: {len(df)}")
 
@@ -800,9 +850,10 @@ def run(base_url: str = BASE_URL, login_url: str = LOGIN_URL, profile_dir: str =
 # Headless entry point (no interactive prompts — used by streamlit_app.py)
 # ═══════════════════════════════════════════════════════════════════════════════
 def run_headless(
-    csv_path:    str,
-    base_url:    str = BASE_URL,
-    profile_dir: str = PROFILE_DIR,
+    csv_path:     str,
+    base_url:     str = BASE_URL,
+    profile_dir:  str = PROFILE_DIR,
+    start_cohort: str = "",
 ) -> str:
     """
     Run updates for a given CSV without any input() prompts.
@@ -823,6 +874,15 @@ def run_headless(
     if "cohort_id" not in df.columns:
         print("[ERROR] CSV must have a 'cohort_id' column.")
         return ""
+
+    if start_cohort:
+        ids = df["cohort_id"].astype(str).str.strip()
+        mask = ids == str(start_cohort).strip()
+        if not mask.any():
+            print(f"[ERROR] cohort_id '{start_cohort}' not found in CSV.")
+            return ""
+        df = df[mask.cumsum() >= 1].reset_index(drop=True)
+        print(f"Resuming from cohort {start_cohort} — {len(df)} row(s) remaining")
 
     print(f"Rows to process: {len(df)}\n")
 
@@ -908,12 +968,14 @@ PREPLEAF_PROFILE_DIR = os.path.join(BASE_DIR, "browser_profile_prepleaf")
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument("--headless",    metavar="CSV",  help="CSV path — run headless (no prompts)")
-    parser.add_argument("--base-url",    default=None,        help="Cohort management base URL")
-    parser.add_argument("--login-url",   default=None,        help="Login page URL")
-    parser.add_argument("--profile-dir", default=None,        help="Playwright browser profile dir")
-    parser.add_argument("--platform",    choices=["masai", "prepleaf"], default="masai",
+    parser.add_argument("--headless",      metavar="CSV", help="CSV path — run headless (no prompts)")
+    parser.add_argument("--base-url",      default=None,  help="Cohort management base URL")
+    parser.add_argument("--login-url",     default=None,  help="Login page URL")
+    parser.add_argument("--profile-dir",   default=None,  help="Playwright browser profile dir")
+    parser.add_argument("--platform",      choices=["masai", "prepleaf"], default="masai",
                         help="Shorthand: masai (default) or prepleaf")
+    parser.add_argument("--start-cohort",  default="",    metavar="COHORT_ID",
+                        help="Skip all rows before this cohort_id (resume from here)")
     args = parser.parse_args()
 
     # Resolve defaults from --platform shorthand
@@ -928,9 +990,11 @@ if __name__ == "__main__":
 
     if args.headless:
         run_headless(
-            csv_path    = args.headless,
-            base_url    = base_url,
-            profile_dir = profile_dir,
+            csv_path     = args.headless,
+            base_url     = base_url,
+            profile_dir  = profile_dir,
+            start_cohort = args.start_cohort,
         )
     else:
-        run(base_url=base_url, login_url=login_url, profile_dir=profile_dir)
+        run(base_url=base_url, login_url=login_url, profile_dir=profile_dir,
+            start_cohort=args.start_cohort)
