@@ -153,7 +153,7 @@ def _go_to_tab(page, name: str):
     """Tabs are <button> elements in the left sidebar nav."""
     _dismiss_dialog(page)
     btn = page.get_by_role("button", name=name)
-    btn.wait_for(state="visible", timeout=6_000)
+    btn.wait_for(state="visible", timeout=15_000)
     btn.first.click()
     page.wait_for_load_state("networkidle")
     page.wait_for_timeout(1_500)
@@ -531,7 +531,7 @@ def process_cohort(page, row, base_url: str = BASE_URL) -> dict:
     print(f"  Loading: {url}")
     page.goto(url)
     page.wait_for_load_state("networkidle")
-    page.wait_for_timeout(2_000)
+    page.wait_for_timeout(3_000)
     _dismiss_dialog(page)
 
     # ── 1. Basic Details ──────────────────────────────────────────────────────
@@ -660,8 +660,13 @@ def run():
             user_data_dir = PROFILE_DIR,
             headless      = True,
             slow_mo       = 200,
-            args          = ["--start-maximized", "--disable-blink-features=AutomationControlled"],
-            no_viewport   = True,
+            viewport      = {"width": 1920, "height": 1080},
+            args          = [
+                "--window-size=1920,1080",
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
         )
         page = context.pages[0] if context.pages else context.new_page()
 
@@ -764,8 +769,13 @@ def run_headless(
             user_data_dir = profile_dir,
             headless      = True,
             slow_mo       = 200,
-            args          = ["--start-maximized", "--disable-blink-features=AutomationControlled"],
-            no_viewport   = True,
+            viewport      = {"width": 1920, "height": 1080},
+            args          = [
+                "--window-size=1920,1080",
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+            ],
         )
         page = context.pages[0] if context.pages else context.new_page()
 
