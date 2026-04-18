@@ -119,15 +119,28 @@ def to_bool(val):
 
 
 def parse_dt(val: str):
-    """DD/MM/YYYY HH:MM or DD-MM-YYYY HH:MM  →  YYYY-MM-DDTHH:MM  (datetime-local format)."""
+    """Parse any recognisable date/datetime string → YYYY-MM-DDTHH:MM (datetime-local format).
+    Tries explicit formats first (DD/MM/YYYY preferred over MM/DD/YYYY), then falls back to
+    pandas flexible parsing with dayfirst=True so day-first ambiguous dates are handled correctly.
+    """
     val = str(val).strip()
-    for fmt in ("%d/%m/%Y %H:%M", "%d/%m/%Y",
-                "%d-%m-%Y %H:%M", "%d-%m-%Y",
-                "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+    for fmt in (
+        "%d/%m/%Y %H:%M", "%d/%m/%Y",
+        "%d-%m-%Y %H:%M", "%d-%m-%Y",
+        "%Y-%m-%dT%H:%M", "%Y-%m-%d %H:%M", "%Y-%m-%d",
+        "%d %b %Y %H:%M", "%d %b %Y",
+        "%d %B %Y %H:%M", "%d %B %Y",
+        "%m/%d/%Y %H:%M", "%m/%d/%Y",
+    ):
         try:
             return datetime.strptime(val, fmt).strftime("%Y-%m-%dT%H:%M")
         except ValueError:
             pass
+    # Flexible fallback via pandas — handles many locale/ordering variants
+    try:
+        return pd.to_datetime(val, dayfirst=True).strftime("%Y-%m-%dT%H:%M")
+    except Exception:
+        pass
     return None
 
 
@@ -260,8 +273,9 @@ def _update_date_field(page, row_label: str, desired_csv, field_name: str) -> st
     desired_dt = None if blank else parse_dt(str(desired_csv).strip())
 
     if not blank and not desired_dt:
-        print(f"  {field_name} → SKIP (invalid date '{desired_csv}')")
-        return SKIPPED
+        print(f"  {field_name} → FAILED (cannot parse date '{desired_csv}' — "
+              f"use DD/MM/YYYY HH:MM or any standard format)")
+        return FAILED
 
     try:
         # Find the <tr> whose first <td> exactly matches the label
@@ -383,32 +397,59 @@ def _update_lms_settings(page, row) -> dict:
             else:
                 print("    No existing sections to clear")
 
-            # Step 2: Open the section picker (inside div.lms-section-dropdown)
-            page.locator(".lms-section-dropdown button").click()
-            page.wait_for_timeout(600)
+            def _open_section_dropdown():
+                """Click the section dropdown toggle and wait for search box."""
+                page.locator(".lms-section-dropdown button").first.click()
+                page.wait_for_timeout(600)
 
+            # Step 2: Open the section picker
+            _open_section_dropdown()
+
+            selected_count = 0
             for section in sections:
+                # If the dropdown closed (search box gone), reopen it
                 search = page.get_by_placeholder("Search sections...")
-                search.wait_for(state="visible", timeout=6_000)
-                search.fill(section)
-                page.wait_for_timeout(800)
+                if not search.is_visible():
+                    print(f"    Dropdown closed — reopening for '{section}'")
+                    _open_section_dropdown()
 
-                # Click the matching result
-                page.get_by_role("button").filter(
+                search.wait_for(state="visible", timeout=8_000)
+                search.fill(section)
+                page.wait_for_timeout(1_000)  # let results load
+
+                # Scope the result click to inside the dropdown — avoids hitting
+                # the "Done (N selected)" button or other page buttons by accident
+                dropdown = page.locator(".lms-section-dropdown")
+                result_btn = dropdown.get_by_role("button").filter(
                     has_text=re.compile(re.escape(section), re.I)
-                ).first.click()
-                page.wait_for_timeout(400)
+                )
+                count = result_btn.count()
+                if count == 0:
+                    print(f"    [WARN] No result found for section '{section}' — skipping")
+                else:
+                    result_btn.first.click()
+                    selected_count += 1
+                    print(f"    Selected [{selected_count}] '{section}'")
+                    page.wait_for_timeout(600)
 
                 # Clear search for next section
-                search.fill("")
-                page.wait_for_timeout(200)
+                if search.is_visible():
+                    search.fill("")
+                    page.wait_for_timeout(400)
 
             # Confirm: "Done (N selected)"
-            page.get_by_role("button").filter(
+            done_btn = page.locator(".lms-section-dropdown").get_by_role("button").filter(
                 has_text=re.compile(r"Done \(\d+ selected\)")
-            ).click()
+            )
+            if done_btn.count() == 0:
+                # Fallback: search the full page
+                done_btn = page.get_by_role("button").filter(
+                    has_text=re.compile(r"Done \(\d+ selected\)")
+                )
+            done_btn.first.click()
             page.wait_for_timeout(600)
-            results["lms_section_ids"] = CHANGED
+            print(f"    Confirmed {selected_count}/{len(sections)} section(s)")
+            results["lms_section_ids"] = CHANGED if selected_count > 0 else FAILED
 
         except Exception as e:
             print(f"    [ERROR] LMS Section IDs: {e}")
