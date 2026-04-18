@@ -2,8 +2,8 @@
 streamlit_app.py — Cohort Management Updater UI
 
 Modes (sidebar)
-  • Prepleaf (iHub) — dashboard-admin.prepleaf.com/iit/cohort-management/70
-  • Masai           — admissions-admin.masaischool.com/user-management
+  • Prepleaf (iHub) — dashboard-admin.prepleaf.com  /  login: ihubiitrcourses.org
+  • Masai           — admissions-admin.masaischool.com
 
 Run locally: streamlit run streamlit_app.py
 """
@@ -13,17 +13,12 @@ import queue
 import subprocess
 import threading
 import time
-from datetime import datetime
 
 import pandas as pd
 import streamlit as st
 
 # ── Page config ───────────────────────────────────────────────────────────────
-st.set_page_config(
-    page_title="Cohort Updater",
-    page_icon="🎓",
-    layout="wide",
-)
+st.set_page_config(page_title="Cohort Updater", page_icon="🎓", layout="wide")
 
 # ── Auto-install Playwright browser on cold start (Streamlit Cloud) ───────────
 @st.cache_resource(show_spinner="Installing browser (first run only)…")
@@ -45,41 +40,42 @@ BASE_DIR      = os.path.dirname(os.path.abspath(__file__))
 INPUT_DIR     = os.path.join(BASE_DIR, "input")
 RUNS_DIR      = os.path.join(BASE_DIR, "runs")
 ARCHIVE_DIR   = os.path.join(BASE_DIR, "archive")
-PROFILE_DIR   = os.path.join(BASE_DIR, "browser_profile")
 UPDATE_SCRIPT = os.path.join(BASE_DIR, "update_cohort.py")
 
 for _d in (INPUT_DIR, RUNS_DIR, ARCHIVE_DIR):
     os.makedirs(_d, exist_ok=True)
 
-# ── Mode config ───────────────────────────────────────────────────────────────
-MODES = {
+# ── Platform config ───────────────────────────────────────────────────────────
+PLATFORMS = {
     "prepleaf": {
-        "label":    "Prepleaf (iHub)",
-        "url":      "https://dashboard-admin.prepleaf.com/iit/cohort-management/70",
-        "login_url":"https://dashboard-admin.prepleaf.com/",
+        "label":       "Prepleaf (iHub)",
+        "base_url":    "https://dashboard-admin.prepleaf.com/iit/cohort-management",
+        "login_url":   "https://www.ihubiitrcourses.org/signup",
+        "profile_dir": os.path.join(BASE_DIR, "browser_profile_prepleaf"),
+        "display_url": "https://dashboard-admin.prepleaf.com/iit/cohort-management/70",
     },
     "masai": {
-        "label":    "Masai",
-        "url":      "https://admissions-admin.masaischool.com/user-management",
-        "login_url":"https://admissions-admin.masaischool.com/",
+        "label":       "Masai",
+        "base_url":    "https://admissions-admin.masaischool.com/iit/cohort-management",
+        "login_url":   "https://admissions-admin.masaischool.com/",
+        "profile_dir": os.path.join(BASE_DIR, "browser_profile"),
+        "display_url": "https://admissions-admin.masaischool.com/user-management",
     },
 }
 
-# ── Sidebar — mode selector ───────────────────────────────────────────────────
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.title("Cohort Updater")
-    mode_key = st.radio(
+    platform_key = st.radio(
         "Select platform",
-        options=list(MODES.keys()),
-        format_func=lambda k: MODES[k]["label"],
+        options=list(PLATFORMS.keys()),
+        format_func=lambda k: PLATFORMS[k]["label"],
     )
     st.divider()
-    st.caption(f"Target: {MODES[mode_key]['url']}")
+    p = PLATFORMS[platform_key]
+    st.caption(f"Target: {p['display_url']}")
 
-mode      = MODES[mode_key]
-LOGIN_URL = mode["login_url"]
-
-# ── Session state — keyed per mode so switching doesn't bleed state ───────────
+# ── Session state — keyed per platform so switching doesn't bleed ─────────────
 _DEFAULTS = {
     "step":           "upload",
     "df":             None,
@@ -93,52 +89,46 @@ _DEFAULTS = {
     "result_csv":     None,
 }
 
-def _key(k):
-    return f"{mode_key}__{k}"
+def _k(key):        return f"{platform_key}__{key}"
+def _get(key):      return st.session_state[_k(key)]
+def _set(key, val): st.session_state[_k(key)] = val
 
-for _k, _v in _DEFAULTS.items():
-    if _key(_k) not in st.session_state:
-        st.session_state[_key(_k)] = _v
-
-def _get(k):
-    return st.session_state[_key(k)]
-
-def _set(k, v):
-    st.session_state[_key(k)] = v
-
+for _key, _val in _DEFAULTS.items():
+    if _k(_key) not in st.session_state:
+        st.session_state[_k(_key)] = _val
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
-def check_session(login_url: str) -> str:
-    """
-    Launch a headless browser with the saved profile and navigate to
-    login_url.  Returns 'active', 'expired', or 'error:<msg>'.
-    """
-    if not os.path.isdir(PROFILE_DIR):
+def check_session(base_url: str, login_url: str, profile_dir: str) -> str:
+    """Navigate to base_url with saved profile; return 'active' or 'expired'."""
+    if not os.path.isdir(profile_dir):
         return "expired"
     try:
         from playwright.sync_api import sync_playwright
-        with sync_playwright() as p:
-            ctx = p.chromium.launch_persistent_context(
-                user_data_dir=PROFILE_DIR, headless=True,
+        with sync_playwright() as pw:
+            ctx = pw.chromium.launch_persistent_context(
+                user_data_dir=profile_dir, headless=True,
             )
             pg = ctx.pages[0] if ctx.pages else ctx.new_page()
-            pg.goto(login_url, timeout=20_000)
+            pg.goto(base_url, timeout=20_000)
             pg.wait_for_load_state("networkidle", timeout=20_000)
             url = pg.url
             ctx.close()
-        if "login" in url.lower() or url.rstrip("/") == login_url.rstrip("/"):
+        # Redirected to a login/signup page → session expired
+        login_host = login_url.split("/")[2]   # e.g. "www.ihubiitrcourses.org"
+        if login_host in url or "login" in url.lower() or "signup" in url.lower():
             return "expired"
         return "active"
     except Exception as exc:
         return f"error:{exc}"
 
 
-def _login_browser_fn(login_url: str, close_event: threading.Event):
-    """Open a headed browser for OTP login; stays open until close_event set."""
+def _login_browser_fn(login_url: str, profile_dir: str, close_event: threading.Event):
+    """Open headed browser for OTP login; stays open until close_event is set."""
     from playwright.sync_api import sync_playwright
-    with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(
-            user_data_dir=PROFILE_DIR,
+    os.makedirs(profile_dir, exist_ok=True)
+    with sync_playwright() as pw:
+        ctx = pw.chromium.launch_persistent_context(
+            user_data_dir=profile_dir,
             headless=False,
             args=["--start-maximized"],
             no_viewport=True,
@@ -146,15 +136,20 @@ def _login_browser_fn(login_url: str, close_event: threading.Event):
         pg = ctx.pages[0] if ctx.pages else ctx.new_page()
         pg.goto(login_url)
         pg.wait_for_load_state("networkidle")
-        close_event.wait()
+        close_event.wait()   # block until user clicks "Done"
         ctx.close()
 
 
-def _run_updates_fn(csv_path: str, q: queue.Queue):
-    """Run update_cohort.py --headless, stream output into queue."""
+def _run_updates_fn(csv_path: str, base_url: str, profile_dir: str, q: queue.Queue):
+    """Run update_cohort.py --headless and stream output into queue."""
     try:
         proc = subprocess.Popen(
-            [sys.executable, UPDATE_SCRIPT, "--headless", csv_path],
+            [
+                sys.executable, UPDATE_SCRIPT,
+                "--headless",    csv_path,
+                "--base-url",    base_url,
+                "--profile-dir", profile_dir,
+            ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             text=True, bufsize=1, cwd=BASE_DIR,
@@ -169,7 +164,7 @@ def _run_updates_fn(csv_path: str, q: queue.Queue):
     except Exception as exc:
         q.put(f"[FATAL] {exc}")
     finally:
-        # Fallback: find the newest CSV in runs/
+        # Fallback: find newest CSV in runs/
         try:
             csvs = sorted(
                 [f for f in os.listdir(RUNS_DIR) if f.endswith(".csv")],
@@ -187,7 +182,7 @@ def _drain_queue() -> bool:
     q = _get("run_queue")
     if not q:
         return False
-    done = False
+    done  = False
     lines = list(_get("output_lines"))
     while True:
         try:
@@ -205,22 +200,13 @@ def _drain_queue() -> bool:
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# Title
+# Page title (updates when sidebar selection changes)
 # ═════════════════════════════════════════════════════════════════════════════
-st.title(mode["label"])
-st.caption(f"Target: `{mode['url']}`")
-
-# ── Prepleaf placeholder ──────────────────────────────────────────────────────
-if mode_key == "prepleaf":
-    st.info(
-        "Prepleaf (iHub) automation is coming soon.  \n"
-        "Share the list of fields you want to update on "
-        f"`{mode['url']}` and we'll build it next."
-    )
-    st.stop()
+st.title(p["label"])
+st.caption(f"Target: `{p['display_url']}`")
 
 # ═════════════════════════════════════════════════════════════════════════════
-# STEP 1 — Upload CSV  (Masai only for now)
+# STEP 1 — Upload CSV
 # ═════════════════════════════════════════════════════════════════════════════
 if _get("step") == "upload":
     st.header("Step 1 — Upload CSV")
@@ -238,7 +224,7 @@ if _get("step") == "upload":
             st.error("CSV must contain a `cohort_id` column.")
             st.stop()
 
-        csv_path = os.path.join(INPUT_DIR, uploaded.name)
+        csv_path = os.path.join(INPUT_DIR, f"{platform_key}_{uploaded.name}")
         uploaded.seek(0)
         with open(csv_path, "wb") as fh:
             fh.write(uploaded.read())
@@ -283,7 +269,9 @@ elif _get("step") == "session":
     with col_check:
         if st.button("Check Session"):
             with st.spinner("Checking…"):
-                _set("session_status", check_session(LOGIN_URL))
+                _set("session_status", check_session(
+                    p["base_url"], p["login_url"], p["profile_dir"]
+                ))
             st.rerun()
     with col_back:
         if st.button("Back"):
@@ -291,10 +279,11 @@ elif _get("step") == "session":
             _set("session_status", None)
             st.rerun()
 
-    # Login flow
+    # ── Login (when expired) ──────────────────────────────────────────────────
     if _get("session_status") == "expired":
         st.divider()
         st.subheader("Log in with OTP")
+
         browser_running = (
             _get("login_thread") is not None and _get("login_thread").is_alive()
         )
@@ -303,12 +292,12 @@ elif _get("step") == "session":
                 ev = threading.Event()
                 t  = threading.Thread(
                     target=_login_browser_fn,
-                    args=(LOGIN_URL, ev),
+                    args=(p["login_url"], p["profile_dir"], ev),
                     daemon=True,
                 )
                 t.start()
                 _set("login_thread", t)
-                _set("login_event", ev)
+                _set("login_event",  ev)
                 st.rerun()
         else:
             st.info(
@@ -319,12 +308,14 @@ elif _get("step") == "session":
                 _get("login_event").set()
                 time.sleep(1.2)
                 with st.spinner("Verifying…"):
-                    _set("session_status", check_session(LOGIN_URL))
+                    _set("session_status", check_session(
+                        p["base_url"], p["login_url"], p["profile_dir"]
+                    ))
                 _set("login_thread", None)
-                _set("login_event", None)
+                _set("login_event",  None)
                 st.rerun()
 
-    # Run button
+    # ── Run (when active) ─────────────────────────────────────────────────────
     if _get("session_status") == "active":
         st.divider()
         df      = _get("df")
@@ -332,18 +323,18 @@ elif _get("step") == "session":
         st.write(f"Ready to update **{len(df)} cohort(s)** from `{csvname}`.")
 
         if st.button("Start Cohort Updates", type="primary"):
-            _set("step", "running")
+            _set("step",         "running")
             _set("output_lines", [])
-            _set("result_csv", None)
+            _set("result_csv",   None)
             q = queue.Queue()
             t = threading.Thread(
                 target=_run_updates_fn,
-                args=(_get("csv_path"), q),
+                args=(_get("csv_path"), p["base_url"], p["profile_dir"], q),
                 daemon=True,
             )
             t.start()
             _set("run_thread", t)
-            _set("run_queue", q)
+            _set("run_queue",  q)
             st.rerun()
 
 
@@ -353,7 +344,7 @@ elif _get("step") == "session":
 elif _get("step") == "running":
     st.header("Step 3 — Running Updates")
 
-    done = _drain_queue()
+    done          = _drain_queue()
     still_running = _get("run_thread") and _get("run_thread").is_alive()
 
     if still_running:
@@ -392,14 +383,12 @@ elif _get("step") == "done":
         STATUS_COLS = [c for c in df_results.columns if c not in ("cohort_id", "notes")]
 
         def _cell_color(val):
-            colors = {
-                "CHANGED": "#d4edda",
-                "FAILED":  "#f8d7da",
-                "ERROR":   "#f8d7da",
-                "SKIPPED": "#e2e3e5",
-            }
-            bg = colors.get(str(val).upper(), "")
-            return f"background-color: {bg}" if bg else ""
+            return {
+                "CHANGED": "background-color: #d4edda",
+                "FAILED":  "background-color: #f8d7da",
+                "ERROR":   "background-color: #f8d7da",
+                "SKIPPED": "background-color: #e2e3e5",
+            }.get(str(val).upper(), "")
 
         st.dataframe(
             df_results.style.applymap(_cell_color, subset=STATUS_COLS),

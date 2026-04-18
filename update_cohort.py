@@ -509,9 +509,9 @@ def _update_toggle(page, label_contains: str, desired, field_name: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Per-cohort processor
 # ═══════════════════════════════════════════════════════════════════════════════
-def process_cohort(page, row) -> dict:
+def process_cohort(page, row, base_url: str = BASE_URL) -> dict:
     cohort_id = str(row["cohort_id"]).strip()
-    url       = f"{BASE_URL}/{cohort_id}"
+    url       = f"{base_url}/{cohort_id}"
 
     s = {
         "cohort_id":                   cohort_id,
@@ -724,7 +724,11 @@ def run():
 # ═══════════════════════════════════════════════════════════════════════════════
 # Headless entry point (no interactive prompts — used by streamlit_app.py)
 # ═══════════════════════════════════════════════════════════════════════════════
-def run_headless(csv_path: str) -> str:
+def run_headless(
+    csv_path:    str,
+    base_url:    str = BASE_URL,
+    profile_dir: str = PROFILE_DIR,
+) -> str:
     """
     Run updates for a given CSV without any input() prompts.
     Returns the path of the results CSV when done.
@@ -747,7 +751,7 @@ def run_headless(csv_path: str) -> str:
 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
-            user_data_dir = PROFILE_DIR,
+            user_data_dir = profile_dir,
             headless      = True,
             slow_mo       = 200,
             args          = ["--start-maximized", "--disable-blink-features=AutomationControlled"],
@@ -762,7 +766,7 @@ def run_headless(csv_path: str) -> str:
             print(f"{'─'*60}")
             print(f"[{i+1}/{len(df)}] Cohort ID: {cohort_id}")
             try:
-                result = process_cohort(page, row)
+                result = process_cohort(page, row, base_url=base_url)
             except Exception as e:
                 print(f"  [ERROR] {e}")
                 result = {
@@ -808,7 +812,18 @@ def run_headless(csv_path: str) -> str:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) >= 3 and sys.argv[1] == "--headless":
-        run_headless(sys.argv[2])
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--headless",    metavar="CSV",  help="CSV path — run headless (no prompts)")
+    parser.add_argument("--base-url",    default=BASE_URL,    help="Cohort management base URL")
+    parser.add_argument("--profile-dir", default=PROFILE_DIR, help="Playwright browser profile dir")
+    args = parser.parse_args()
+
+    if args.headless:
+        run_headless(
+            csv_path    = args.headless,
+            base_url    = args.base_url,
+            profile_dir = args.profile_dir,
+        )
     else:
         run()
