@@ -11,7 +11,7 @@ import os
 import sys
 import queue
 import subprocess
-import threading
+import threading   # still used for run_updates_fn thread
 import time
 
 import pandas as pd
@@ -81,8 +81,7 @@ _DEFAULTS = {
     "df":             None,
     "csv_path":       None,
     "session_status": None,
-    "login_thread":   None,
-    "login_event":    None,
+    "login_proc":     None,   # subprocess.Popen for headed login browser
     "run_thread":     None,
     "run_queue":      None,
     "output_lines":   [],
@@ -113,31 +112,44 @@ def check_session(base_url: str, login_url: str, profile_dir: str) -> str:
             pg.wait_for_load_state("networkidle", timeout=20_000)
             url = pg.url
             ctx.close()
-        # Redirected to a login/signup page → session expired
-        login_host = login_url.split("/")[2]   # e.g. "www.ihubiitrcourses.org"
-        if login_host in url or "login" in url.lower() or "signup" in url.lower():
+        # Expired if redirected to a login/signup page (keyword check only —
+        # do NOT check login_host because it matches valid pages on the same domain)
+        base_domain = base_url.split("/")[2]   # e.g. "admissions-admin.masaischool.com"
+        if "login" in url.lower() or "signup" in url.lower() or base_domain not in url:
             return "expired"
         return "active"
     except Exception as exc:
         return f"error:{exc}"
 
 
-def _login_browser_fn(login_url: str, profile_dir: str, close_event: threading.Event):
-    """Open headed browser for OTP login; stays open until close_event is set."""
-    from playwright.sync_api import sync_playwright
+def _open_login_browser(login_url: str, profile_dir: str) -> subprocess.Popen:
+    """
+    Launch a headed Playwright browser as a subprocess (avoids macOS
+    main-thread restriction that breaks threading approach).
+    The subprocess blocks on stdin.readline() — sending a newline closes it.
+    """
     os.makedirs(profile_dir, exist_ok=True)
-    with sync_playwright() as pw:
-        ctx = pw.chromium.launch_persistent_context(
-            user_data_dir=profile_dir,
-            headless=False,
-            args=["--start-maximized"],
-            no_viewport=True,
-        )
-        pg = ctx.pages[0] if ctx.pages else ctx.new_page()
-        pg.goto(login_url)
-        pg.wait_for_load_state("networkidle")
-        close_event.wait()   # block until user clicks "Done"
-        ctx.close()
+    script = (
+        "from playwright.sync_api import sync_playwright; import sys\n"
+        f"with sync_playwright() as pw:\n"
+        f"    ctx = pw.chromium.launch_persistent_context(\n"
+        f"        user_data_dir={repr(profile_dir)},\n"
+        f"        headless=False,\n"
+        f"        args=['--start-maximized'],\n"
+        f"        no_viewport=True,\n"
+        f"    )\n"
+        f"    pg = ctx.pages[0] if ctx.pages else ctx.new_page()\n"
+        f"    pg.goto({repr(login_url)})\n"
+        f"    pg.wait_for_load_state('networkidle')\n"
+        f"    sys.stdin.readline()  # wait for close signal\n"
+        f"    ctx.close()\n"
+    )
+    return subprocess.Popen(
+        [sys.executable, "-c", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
 
 
 def _run_updates_fn(csv_path: str, base_url: str, profile_dir: str, q: queue.Queue):
@@ -284,20 +296,12 @@ elif _get("step") == "session":
         st.divider()
         st.subheader("Log in with OTP")
 
-        browser_running = (
-            _get("login_thread") is not None and _get("login_thread").is_alive()
-        )
+        proc = _get("login_proc")
+        browser_running = proc is not None and proc.poll() is None
+
         if not browser_running:
             if st.button("Open Login Browser", type="primary"):
-                ev = threading.Event()
-                t  = threading.Thread(
-                    target=_login_browser_fn,
-                    args=(p["login_url"], p["profile_dir"], ev),
-                    daemon=True,
-                )
-                t.start()
-                _set("login_thread", t)
-                _set("login_event",  ev)
+                _set("login_proc", _open_login_browser(p["login_url"], p["profile_dir"]))
                 st.rerun()
         else:
             st.info(
@@ -305,14 +309,19 @@ elif _get("step") == "session":
                 "Complete the OTP login there, then click the button below."
             )
             if st.button("Done — I'm logged in", type="primary"):
-                _get("login_event").set()
-                time.sleep(1.2)
+                proc = _get("login_proc")
+                try:
+                    proc.stdin.write(b"\n")
+                    proc.stdin.flush()
+                    proc.wait(timeout=3)
+                except Exception:
+                    proc.terminate()
+                _set("login_proc", None)
+                time.sleep(0.8)
                 with st.spinner("Verifying…"):
                     _set("session_status", check_session(
                         p["base_url"], p["login_url"], p["profile_dir"]
                     ))
-                _set("login_thread", None)
-                _set("login_event",  None)
                 st.rerun()
 
     # ── Run (when active) ─────────────────────────────────────────────────────
