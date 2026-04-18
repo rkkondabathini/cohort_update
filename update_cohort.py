@@ -576,7 +576,7 @@ def process_cohort(page, row, base_url: str = BASE_URL) -> dict:
 # ═══════════════════════════════════════════════════════════════════════════════
 # Login helper — headed browser, handles OTP if session is expired
 # ═══════════════════════════════════════════════════════════════════════════════
-def _ensure_logged_in():
+def _ensure_logged_in(login_url: str = LOGIN_URL, profile_dir: str = PROFILE_DIR):
     """
     Open a headed browser to check / restore the session.
     - If already logged in: shows confirmation, user presses ENTER to proceed.
@@ -586,16 +586,16 @@ def _ensure_logged_in():
     print("\n── Step 1 of 2: Login check ─────────────────────────────")
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
-            user_data_dir = PROFILE_DIR,
+            user_data_dir = profile_dir,
             headless      = False,
             args          = ["--start-maximized"],
             no_viewport   = True,
         )
         page = context.pages[0] if context.pages else context.new_page()
-        page.goto(LOGIN_URL)
+        page.goto(login_url)
         page.wait_for_load_state("networkidle")
 
-        if LOGIN_URL.rstrip("/") in page.url.rstrip("/") or "login" in page.url.lower():
+        if login_url.rstrip("/") in page.url.rstrip("/") or "login" in page.url.lower() or "signup" in page.url.lower():
             print("Session expired — please log in with OTP in the browser window.")
             input("Press ENTER once you are on the dashboard... ")
             page.wait_for_load_state("networkidle", timeout=60_000)
@@ -611,7 +611,7 @@ def _ensure_logged_in():
 # ═══════════════════════════════════════════════════════════════════════════════
 # Entry point
 # ═══════════════════════════════════════════════════════════════════════════════
-def run():
+def run(base_url: str = BASE_URL, login_url: str = LOGIN_URL, profile_dir: str = PROFILE_DIR):
     # ── Step 1: CSV selection ─────────────────────────────────────────────────
     csv_files = sorted(glob.glob(os.path.join(INPUT_DIR, "*.csv")))
 
@@ -644,7 +644,7 @@ def run():
     print(f"\nRows to process: {len(df)}")
 
     # ── Step 2: Login (headed, with OTP if needed) ────────────────────────────
-    _ensure_logged_in()
+    _ensure_logged_in(login_url=login_url, profile_dir=profile_dir)
 
     # ── Step 3: Run updates (headless) ────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -657,7 +657,7 @@ def run():
 
     with sync_playwright() as p:
         context = p.chromium.launch_persistent_context(
-            user_data_dir = PROFILE_DIR,
+            user_data_dir = profile_dir,
             headless      = True,
             slow_mo       = 200,
             viewport      = {"width": 1920, "height": 1080},
@@ -673,14 +673,12 @@ def run():
         print("── Step 2 of 2: Cohort updates ──────────────────────────")
         print("Starting cohort updates...\n")
 
-        print("Starting cohort updates...\n")
-
         for i, row in df.iterrows():
             cohort_id = str(row.get("cohort_id", "")).strip()
             print(f"{'─'*60}")
             print(f"[{i+1}/{len(df)}] Cohort ID: {cohort_id}")
             try:
-                result = process_cohort(page, row)
+                result = process_cohort(page, row, base_url=base_url)
             except Exception as e:
                 print(f"  [ERROR] {e}")
                 result = {
@@ -831,19 +829,36 @@ def run_headless(
     return csv_out
 
 
+PREPLEAF_BASE_URL   = "https://dashboard-admin.prepleaf.com/iit/cohort-management"
+PREPLEAF_LOGIN_URL  = "https://www.ihubiitrcourses.org/signup"
+PREPLEAF_PROFILE_DIR = os.path.join(BASE_DIR, "browser_profile_prepleaf")
+
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser()
     parser.add_argument("--headless",    metavar="CSV",  help="CSV path — run headless (no prompts)")
-    parser.add_argument("--base-url",    default=BASE_URL,    help="Cohort management base URL")
-    parser.add_argument("--profile-dir", default=PROFILE_DIR, help="Playwright browser profile dir")
+    parser.add_argument("--base-url",    default=None,        help="Cohort management base URL")
+    parser.add_argument("--login-url",   default=None,        help="Login page URL")
+    parser.add_argument("--profile-dir", default=None,        help="Playwright browser profile dir")
+    parser.add_argument("--platform",    choices=["masai", "prepleaf"], default="masai",
+                        help="Shorthand: masai (default) or prepleaf")
     args = parser.parse_args()
+
+    # Resolve defaults from --platform shorthand
+    if args.platform == "prepleaf":
+        base_url    = args.base_url    or PREPLEAF_BASE_URL
+        login_url   = args.login_url   or PREPLEAF_LOGIN_URL
+        profile_dir = args.profile_dir or PREPLEAF_PROFILE_DIR
+    else:
+        base_url    = args.base_url    or BASE_URL
+        login_url   = args.login_url   or LOGIN_URL
+        profile_dir = args.profile_dir or PROFILE_DIR
 
     if args.headless:
         run_headless(
             csv_path    = args.headless,
-            base_url    = args.base_url,
-            profile_dir = args.profile_dir,
+            base_url    = base_url,
+            profile_dir = profile_dir,
         )
     else:
-        run()
+        run(base_url=base_url, login_url=login_url, profile_dir=profile_dir)
