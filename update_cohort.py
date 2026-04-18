@@ -721,5 +721,94 @@ def run():
     _stop_log()
 
 
+# ═══════════════════════════════════════════════════════════════════════════════
+# Headless entry point (no interactive prompts — used by streamlit_app.py)
+# ═══════════════════════════════════════════════════════════════════════════════
+def run_headless(csv_path: str) -> str:
+    """
+    Run updates for a given CSV without any input() prompts.
+    Returns the path of the results CSV when done.
+    """
+    df = pd.read_csv(csv_path, dtype=str)
+
+    if "cohort_id" not in df.columns:
+        print("[ERROR] CSV must have a 'cohort_id' column.")
+        return ""
+
+    print(f"Rows to process: {len(df)}\n")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base      = os.path.splitext(os.path.basename(csv_path))[0]
+    log_stem  = f"cohort_{base}_{timestamp}"
+
+    _start_log(log_stem)
+
+    all_results = []
+
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            user_data_dir = PROFILE_DIR,
+            headless      = True,
+            slow_mo       = 200,
+            args          = ["--start-maximized", "--disable-blink-features=AutomationControlled"],
+            no_viewport   = True,
+        )
+        page = context.pages[0] if context.pages else context.new_page()
+
+        print("Starting cohort updates...\n")
+
+        for i, row in df.iterrows():
+            cohort_id = str(row.get("cohort_id", "")).strip()
+            print(f"{'─'*60}")
+            print(f"[{i+1}/{len(df)}] Cohort ID: {cohort_id}")
+            try:
+                result = process_cohort(page, row)
+            except Exception as e:
+                print(f"  [ERROR] {e}")
+                result = {
+                    "cohort_id":                   cohort_id,
+                    "batch_id":                    ERROR,
+                    "hall_ticket_prefix":          ERROR,
+                    "student_prefix":              ERROR,
+                    "foundation_starts":           ERROR,
+                    "batch_start_date":            ERROR,
+                    "lms_batch_id":                ERROR,
+                    "lms_section_ids":             ERROR,
+                    "manager_id":                  ERROR,
+                    "enable_kit":                  ERROR,
+                    "disable_welcome_kit_tshirt":  ERROR,
+                    "notes":                       str(e),
+                }
+            all_results.append(result)
+            print()
+
+        context.close()
+
+    csv_out = os.path.join(RUNS_DIR, f"{log_stem}.csv")
+    pd.DataFrame(all_results).to_csv(csv_out, index=False)
+    print(f"\nResults CSV → {csv_out}")
+
+    dest = os.path.join(ARCHIVE_DIR, f"{base}_{timestamp}.csv")
+    shutil.copy2(csv_path, dest)
+    print(f"Input archived → {dest}")
+
+    df_log = pd.DataFrame(all_results)
+    print("\n══ Summary ══════════════════════════════════════════════")
+    for col in ["batch_id", "hall_ticket_prefix", "student_prefix",
+                "foundation_starts", "batch_start_date",
+                "lms_batch_id", "lms_section_ids", "manager_id",
+                "enable_kit", "disable_welcome_kit_tshirt"]:
+        if col in df_log.columns:
+            print(f"  {col:35s}: {df_log[col].value_counts().to_dict()}")
+    print("═════════════════════════════════════════════════════════")
+    print(f"Done. RESULT_CSV:{csv_out}")
+
+    _stop_log()
+    return csv_out
+
+
 if __name__ == "__main__":
-    run()
+    if len(sys.argv) >= 3 and sys.argv[1] == "--headless":
+        run_headless(sys.argv[2])
+    else:
+        run()
