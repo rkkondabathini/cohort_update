@@ -574,9 +574,45 @@ def process_cohort(page, row) -> dict:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# Login helper — headed browser, handles OTP if session is expired
+# ═══════════════════════════════════════════════════════════════════════════════
+def _ensure_logged_in():
+    """
+    Open a headed browser to check / restore the session.
+    - If already logged in: shows confirmation, user presses ENTER to proceed.
+    - If session expired: waits for OTP login, then user presses ENTER to proceed.
+    Closes the headed browser before returning so headless can open the same profile.
+    """
+    print("\n── Step 1 of 2: Login check ─────────────────────────────")
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            user_data_dir = PROFILE_DIR,
+            headless      = False,
+            args          = ["--start-maximized"],
+            no_viewport   = True,
+        )
+        page = context.pages[0] if context.pages else context.new_page()
+        page.goto(LOGIN_URL)
+        page.wait_for_load_state("networkidle")
+
+        if LOGIN_URL.rstrip("/") in page.url.rstrip("/") or "login" in page.url.lower():
+            print("Session expired — please log in with OTP in the browser window.")
+            input("Press ENTER once you are on the dashboard... ")
+            page.wait_for_load_state("networkidle", timeout=60_000)
+            print(f"Logged in. URL: {page.url}")
+        else:
+            print(f"Session active. URL: {page.url}")
+
+        input("Press ENTER to start updating cohorts... ")
+        context.close()
+    print("Login confirmed. Opening headless browser for updates...\n")
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # Entry point
 # ═══════════════════════════════════════════════════════════════════════════════
 def run():
+    # ── Step 1: CSV selection ─────────────────────────────────────────────────
     csv_files = sorted(glob.glob(os.path.join(INPUT_DIR, "*.csv")))
 
     if not csv_files:
@@ -599,20 +635,23 @@ def run():
             print("[ERROR] Invalid selection.")
             return
 
+    df = pd.read_csv(chosen, dtype=str)
+
+    if "cohort_id" not in df.columns:
+        print("[ERROR] CSV must have a 'cohort_id' column.")
+        return
+
+    print(f"\nRows to process: {len(df)}")
+
+    # ── Step 2: Login (headed, with OTP if needed) ────────────────────────────
+    _ensure_logged_in()
+
+    # ── Step 3: Run updates (headless) ────────────────────────────────────────
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base      = os.path.splitext(os.path.basename(chosen))[0]
     log_stem  = f"cohort_{base}_{timestamp}"
 
     _start_log(log_stem)
-
-    df = pd.read_csv(chosen, dtype=str)
-
-    if "cohort_id" not in df.columns:
-        print("[ERROR] CSV must have a 'cohort_id' column.")
-        _stop_log()
-        return
-
-    print(f"\nRows to process: {len(df)}\n")
 
     all_results = []
 
@@ -626,19 +665,8 @@ def run():
         )
         page = context.pages[0] if context.pages else context.new_page()
 
-        # ── Session check ─────────────────────────────────────────────────────
-        page.goto(LOGIN_URL)
-        page.wait_for_load_state("networkidle")
-
-        if LOGIN_URL.rstrip("/") in page.url.rstrip("/") or "login" in page.url.lower():
-            context.close()
-            print("\n[ERROR] Session expired or not found.")
-            print("  Run this first:  python onwards-masai/login.py")
-            print("  Then re-run:     python onwards-masai/update_cohort.py")
-            _stop_log()
-            return
-
-        print(f"Session active. URL: {page.url}")
+        print("── Step 2 of 2: Cohort updates ──────────────────────────")
+        print("Starting cohort updates...\n")
 
         print("Starting cohort updates...\n")
 
