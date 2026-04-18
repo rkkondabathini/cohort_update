@@ -424,10 +424,7 @@ def _update_lms_settings(page, row) -> dict:
                 # Snapshot chip count before clicking so we can verify after
                 before = _chip_count()
 
-                # Triple-click selects all existing text, then fill overwrites cleanly
-                search.triple_click()
-                page.wait_for_timeout(200)
-                search.fill(section)
+                search.fill(section)  # fill() replaces the entire input value
                 page.wait_for_timeout(1_500)  # wait for search results to load
 
                 # Build candidate list — exclude "Done (N selected)" button so it
@@ -474,7 +471,6 @@ def _update_lms_settings(page, row) -> dict:
                 # Clear search field before next section
                 if _section_dropdown_open():
                     search = page.get_by_placeholder("Search sections...")
-                    search.triple_click()
                     search.fill("")
                     page.wait_for_timeout(800)
 
