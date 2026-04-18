@@ -733,6 +733,16 @@ def run_headless(
     Run updates for a given CSV without any input() prompts.
     Returns the path of the results CSV when done.
     """
+    # Debug banner — visible immediately in Streamlit output
+    print("=" * 60)
+    print(f"run_headless() called")
+    print(f"  csv_path    : {csv_path}")
+    print(f"  base_url    : {base_url}")
+    print(f"  profile_dir : {profile_dir}")
+    print(f"  profile_exists: {os.path.isdir(profile_dir)}")
+    print("=" * 60)
+    sys.stdout.flush()
+
     df = pd.read_csv(csv_path, dtype=str)
 
     if "cohort_id" not in df.columns:

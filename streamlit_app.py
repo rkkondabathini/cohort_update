@@ -153,26 +153,30 @@ def _open_login_browser(login_url: str, profile_dir: str) -> subprocess.Popen:
 
 
 def _run_updates_fn(csv_path: str, base_url: str, profile_dir: str, q: queue.Queue):
-    """Run update_cohort.py --headless and stream output into queue."""
+    """Run update_cohort.py --headless and stream every output line into queue."""
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"   # force unbuffered even if -u is missed
     try:
         proc = subprocess.Popen(
             [
-                sys.executable, UPDATE_SCRIPT,
+                sys.executable, "-u", UPDATE_SCRIPT,   # -u = unbuffered stdout
                 "--headless",    csv_path,
                 "--base-url",    base_url,
                 "--profile-dir", profile_dir,
             ],
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True, bufsize=1, cwd=BASE_DIR,
+            text=True, bufsize=1,
+            cwd=BASE_DIR, env=env,
         )
         for line in proc.stdout:
             stripped = line.rstrip("\n")
             if stripped.startswith("Done. RESULT_CSV:"):
                 q.put(f"__RESULT__:{stripped.split(':', 1)[1]}")
-            else:
-                q.put(stripped)
+            q.put(stripped)        # always show in terminal too
         proc.wait()
+        if proc.returncode != 0:
+            q.put(f"[PROCESS] exited with code {proc.returncode}")
     except Exception as exc:
         q.put(f"[FATAL] {exc}")
     finally:
@@ -348,29 +352,29 @@ elif _get("step") == "session":
 
 
 # ═════════════════════════════════════════════════════════════════════════════
-# STEP 3 — Running
+# STEP 3 — Running  (live terminal output)
 # ═════════════════════════════════════════════════════════════════════════════
 elif _get("step") == "running":
-    st.header("Step 3 — Running Updates")
-
-    done          = _drain_queue()
     still_running = _get("run_thread") and _get("run_thread").is_alive()
+    done          = _drain_queue()
 
     if still_running:
-        st.spinner("Updates in progress…")
+        st.header("Step 3 — Running Updates")
+        st.caption("Live output — updates every second")
+    else:
+        st.header("Step 3 — Finishing up…")
 
     lines = _get("output_lines")
-    st.code(
-        "\n".join(lines) if lines else "(waiting for first output…)",
-        language="text",
-    )
+    # Terminal-style: dark background, monospace, scrollable
+    terminal_text = "\n".join(lines) if lines else "(waiting for first output…)"
+    st.code(terminal_text, language="text")
 
     if done or not still_running:
-        _drain_queue()
+        _drain_queue()   # final drain
         _set("step", "done")
         st.rerun()
     else:
-        time.sleep(0.8)
+        time.sleep(1.0)
         st.rerun()
 
 
@@ -379,11 +383,37 @@ elif _get("step") == "running":
 # ═════════════════════════════════════════════════════════════════════════════
 elif _get("step") == "done":
     st.header("Updates Complete")
-    st.success("All cohort updates have finished.")
 
-    with st.expander("Full output log", expanded=False):
-        st.code("\n".join(_get("output_lines")), language="text")
+    # ── Terminal log (always visible) ─────────────────────────────────────────
+    st.subheader("Terminal Output")
+    lines = _get("output_lines")
+    st.code("\n".join(lines) if lines else "(no output captured)", language="text")
 
+    # ── Log file from disk (more detail, has timestamps) ─────────────────────
+    log_files = sorted(
+        [f for f in os.listdir(RUNS_DIR) if f.endswith(".log")],
+        key=lambda f: os.path.getmtime(os.path.join(RUNS_DIR, f)),
+        reverse=True,
+    )
+    if log_files:
+        log_path = os.path.join(RUNS_DIR, log_files[0])
+        with st.expander(f"Full log file — {log_files[0]}", expanded=False):
+            try:
+                with open(log_path, encoding="utf-8") as fh:
+                    st.code(fh.read(), language="text")
+            except Exception as exc:
+                st.warning(f"Could not read log: {exc}")
+        with open(log_path, "rb") as fh:
+            st.download_button(
+                "Download Log File",
+                data=fh,
+                file_name=log_files[0],
+                mime="text/plain",
+            )
+
+    st.divider()
+
+    # ── Results table ─────────────────────────────────────────────────────────
     result_csv = _get("result_csv")
     if result_csv and os.path.exists(result_csv):
         df_results = pd.read_csv(result_csv, dtype=str)
@@ -411,8 +441,12 @@ elif _get("step") == "done":
                 mime="text/csv",
             )
     else:
-        st.warning("Result CSV not found — check the `runs/` folder manually.")
+        st.warning(
+            "Results CSV not found.  \n"
+            "Check the terminal output above for errors."
+        )
 
+    st.divider()
     if st.button("Run Another Update"):
         for k, v in _DEFAULTS.items():
             _set(k, v)
