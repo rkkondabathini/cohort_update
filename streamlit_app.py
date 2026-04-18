@@ -55,7 +55,7 @@ PLATFORMS = {
         "display_url": "https://dashboard-admin.prepleaf.com/iit/cohort-management/70",
     },
     "masai": {
-        "label":       "Masai",
+        "label":       "masaischool.com",
         "base_url":    "https://admissions-admin.masaischool.com/iit/cohort-management",
         "login_url":   "https://admissions-admin.masaischool.com/",
         "profile_dir": os.path.join(BASE_DIR, "browser_profile"),
