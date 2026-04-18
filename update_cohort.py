@@ -378,78 +378,109 @@ def _update_lms_settings(page, row) -> dict:
 
     # ── LMS Section IDs ───────────────────────────────────────────────────────
     if sections:
-        print(f"  LMS Section IDs → {sections}")
+        expected = len(sections)
+        print(f"  LMS Section IDs → {expected} section(s): {sections}")
         try:
-            # Step 1: Remove all existing section chips
-            # Section chips are <span class="...bg-green-50..."> containing a <button>
+            # Step 1: Remove ALL existing section chips first
             removed = 0
             for _ in range(50):  # safety cap
                 rm = page.locator("span.bg-green-50 button")
                 if rm.count() == 0:
                     break
                 rm.first.click()
-                page.wait_for_timeout(300)
+                page.wait_for_timeout(400)
                 removed += 1
-
             if removed:
                 print(f"    Cleared {removed} existing section(s)")
-                page.wait_for_timeout(400)
+                page.wait_for_timeout(600)
             else:
                 print("    No existing sections to clear")
 
+            # ── helpers ───────────────────────────────────────────────────
+            def _section_dropdown_open() -> bool:
+                return page.get_by_placeholder("Search sections...").is_visible()
+
             def _open_section_dropdown():
-                """Click the section dropdown toggle and wait for search box."""
                 page.locator(".lms-section-dropdown button").first.click()
-                page.wait_for_timeout(600)
+                page.wait_for_timeout(1_000)
 
-            # Step 2: Open the section picker
-            _open_section_dropdown()
-
-            selected_count = 0
-            for section in sections:
-                # If the dropdown closed (search box gone), reopen it
-                search = page.get_by_placeholder("Search sections...")
-                if not search.is_visible():
-                    print(f"    Dropdown closed — reopening for '{section}'")
+            def _try_select_section(section: str) -> bool:
+                """One attempt to select a single section. Returns True on success."""
+                if not _section_dropdown_open():
                     _open_section_dropdown()
 
-                search.wait_for(state="visible", timeout=8_000)
+                search = page.get_by_placeholder("Search sections...")
+                search.wait_for(state="visible", timeout=6_000)
+
+                # Triple-click selects all existing text, then fill overwrites cleanly
+                search.triple_click()
+                page.wait_for_timeout(200)
                 search.fill(section)
-                page.wait_for_timeout(1_000)  # let results load
+                page.wait_for_timeout(1_500)  # wait for search results to load
 
-                # Scope the result click to inside the dropdown — avoids hitting
-                # the "Done (N selected)" button or other page buttons by accident
-                dropdown = page.locator(".lms-section-dropdown")
-                result_btn = dropdown.get_by_role("button").filter(
-                    has_text=re.compile(re.escape(section), re.I)
+                # Find the result button — look inside the dropdown first,
+                # then fall back to full page (in case the list renders outside the container)
+                pattern = re.compile(re.escape(section), re.I)
+                result = page.locator(".lms-section-dropdown").get_by_role("button").filter(
+                    has_text=pattern
                 )
-                count = result_btn.count()
-                if count == 0:
-                    print(f"    [WARN] No result found for section '{section}' — skipping")
-                else:
-                    result_btn.first.click()
-                    selected_count += 1
-                    print(f"    Selected [{selected_count}] '{section}'")
-                    page.wait_for_timeout(600)
+                if result.count() == 0:
+                    result = page.get_by_role("button").filter(has_text=pattern)
+                if result.count() == 0:
+                    return False  # no matching result in dropdown
 
-                # Clear search for next section
-                if search.is_visible():
+                result.first.click()
+                page.wait_for_timeout(1_200)  # wait for chip to appear / UI to settle
+
+                # Clear search field before next section
+                if _section_dropdown_open():
+                    search = page.get_by_placeholder("Search sections...")
+                    search.triple_click()
                     search.fill("")
-                    page.wait_for_timeout(400)
+                    page.wait_for_timeout(700)
 
-            # Confirm: "Done (N selected)"
-            done_btn = page.locator(".lms-section-dropdown").get_by_role("button").filter(
+                return True
+
+            # ── Step 2: select every section (up to 3 attempts each) ──────
+            _open_section_dropdown()
+
+            ok_sections   = []
+            fail_sections = []
+
+            for i, section in enumerate(sections):
+                print(f"    [{i+1}/{expected}] '{section}'")
+                succeeded = False
+                for attempt in range(1, 4):
+                    try:
+                        if _try_select_section(section):
+                            print(f"      ✓ selected (attempt {attempt})")
+                            ok_sections.append(section)
+                            succeeded = True
+                            break
+                        else:
+                            print(f"      attempt {attempt}: result not found, retrying…")
+                            page.wait_for_timeout(800)
+                    except Exception as ex:
+                        print(f"      attempt {attempt} error: {ex}")
+                        page.wait_for_timeout(800)
+                if not succeeded:
+                    print(f"      ✗ FAILED after 3 attempts")
+                    fail_sections.append(section)
+
+            print(f"    Summary: {len(ok_sections)}/{expected} selected "
+                  f"— ok={ok_sections} fail={fail_sections}")
+
+            # ── Step 3: click Done ────────────────────────────────────────
+            done_btn = page.get_by_role("button").filter(
                 has_text=re.compile(r"Done \(\d+ selected\)")
             )
-            if done_btn.count() == 0:
-                # Fallback: search the full page
-                done_btn = page.get_by_role("button").filter(
-                    has_text=re.compile(r"Done \(\d+ selected\)")
-                )
-            done_btn.first.click()
-            page.wait_for_timeout(600)
-            print(f"    Confirmed {selected_count}/{len(sections)} section(s)")
-            results["lms_section_ids"] = CHANGED if selected_count > 0 else FAILED
+            if done_btn.count() > 0:
+                done_btn.first.click()
+                page.wait_for_timeout(800)
+            else:
+                print("    [WARN] 'Done' button not found — changes may not be saved")
+
+            results["lms_section_ids"] = CHANGED if ok_sections else FAILED
 
         except Exception as e:
             print(f"    [ERROR] LMS Section IDs: {e}")
